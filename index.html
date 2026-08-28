@@ -84,6 +84,8 @@
   .side .me{margin:0 14px;background:rgba(255,255,255,.07);border-radius:10px;padding:13px 14px;font-size:12.5px}
   .side .me b{display:block;color:#fff;font-size:14px;margin-bottom:2px}
   .side .me .tag{display:inline-block;margin-top:8px;background:var(--sky-500);color:#04283f;font-weight:700;border-radius:5px;padding:2px 7px;font-size:11px}
+  .side .sync{margin:10px 14px 0;font-size:11.5px;color:#9fc6e4;line-height:1.5}
+  .side .sync span{color:#dcefff;font-weight:600}
   .side .out{margin:12px 14px 0;text-align:center;background:transparent;border:1px solid rgba(255,255,255,.25);color:#cfe6f7;border-radius:8px;padding:9px}
   .side .out:hover{background:rgba(255,255,255,.1);color:#fff}
 
@@ -285,25 +287,158 @@ const holName=s=>{const h=DB.holidays.find(x=>x.date===s);return h?h.name:'';};
 const mdLabel=s=>`${+s.slice(5,7)}/${+s.slice(8)}`;
 
 /* ============================================================
-   저장소
+   저장소 — Supabase
+   ------------------------------------------------------------
+   ▼▼▼ 여기 두 줄만 본인 프로젝트 값으로 바꾸면 됩니다 ▼▼▼
+   Supabase 대시보드 > Project Settings > Data API 에서 확인
 ============================================================ */
-let DB=null;
-let STORAGE_MODE='없음';
-const Store={
-  async load(){
-    let d=null;
-    try{ if(window.storage){ const r=await window.storage.get(KEY); if(r&&r.value){d=JSON.parse(r.value); STORAGE_MODE='앱 저장소';} } }catch(e){}
-    if(!d){ try{ const v=localStorage.getItem(KEY); if(v){ d=JSON.parse(v); STORAGE_MODE='브라우저 저장소'; } }catch(e){} }
-    return d;
+const SUPABASE_URL      = 'https://YOUR-PROJECT.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
+/* ▲▲▲ 여기까지 ▲▲▲ */
+
+const TKEY = KEY + '_session';   // 세션 토큰 보관
+const MKEY = KEY + '_mirror';    // 오프라인 대비 로컬 사본
+
+let DB = null;
+let DOC_VERSION = 0;
+let HAS_MASTER = false;
+let STORAGE_MODE = '연결 확인 중…';
+
+/* ---------- Supabase RPC 호출 ---------- */
+const Net = {
+  ready(){
+    return /^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/.test(SUPABASE_URL)
+        && (SUPABASE_ANON_KEY||'').length > 30;
   },
-  async save(){
-    const json=JSON.stringify(DB); let ok=false;
-    try{ if(window.storage){ await window.storage.set(KEY,json); ok=true; if(STORAGE_MODE==='없음')STORAGE_MODE='앱 저장소'; } }catch(e){}
-    try{ localStorage.setItem(KEY,json); ok=true; if(STORAGE_MODE==='없음')STORAGE_MODE='브라우저 저장소'; }catch(e){}
-    return ok;
+  async rpc(fn, args){
+    if(!this.ready()) throw new Error('Supabase 연결 정보가 아직 설정되지 않았습니다.');
+    let r;
+    try{
+      r = await fetch(`${SUPABASE_URL.replace(/\/$/,'')}/rest/v1/rpc/${fn}`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json',
+                 'apikey':SUPABASE_ANON_KEY,
+                 'Authorization':`Bearer ${SUPABASE_ANON_KEY}`},
+        body: JSON.stringify(args||{})
+      });
+    }catch(e){ throw new Error('서버에 연결할 수 없습니다. 네트워크를 확인하세요.'); }
+    const txt = await r.text();
+    let body = null;
+    try{ body = txt ? JSON.parse(txt) : null; }catch(e){ body = txt; }
+    if(!r.ok){
+      const msg = (body && (body.message || body.hint || body.details)) || `서버 오류 (${r.status})`;
+      const err = new Error(String(msg)); err.status = r.status; throw err;
+    }
+    return body;
   }
 };
-const save=()=>{Store.save();};
+
+/* ---------- 세션 토큰 ---------- */
+const Session = {
+  token:null,
+  load(){ try{ const v=JSON.parse(localStorage.getItem(TKEY)||'null'); if(v&&v.token) this.token=v.token; }catch(e){} return this.token; },
+  set(t){ this.token=t; try{ localStorage.setItem(TKEY, JSON.stringify({token:t})); }catch(e){} },
+  clear(){ this.token=null; try{ localStorage.removeItem(TKEY); localStorage.removeItem(MKEY); }catch(e){} }
+};
+
+/* ---------- 로컬 사본(오프라인/새로고침 대비) ---------- */
+function mirrorWrite(dirty){
+  try{ localStorage.setItem(MKEY, JSON.stringify({doc:DB, version:DOC_VERSION, dirty:!!dirty})); }catch(e){}
+}
+function mirrorRead(){
+  try{ return JSON.parse(localStorage.getItem(MKEY)||'null'); }catch(e){ return null; }
+}
+
+/* ---------- 저장 큐 (묶어서 전송 · 실패 시 자동 재시도) ---------- */
+let SAVE_TIMER=null, SAVING=false, DIRTY=false, RETRY_MS=0;
+
+function setMode(m){ STORAGE_MODE=m; paintSync(); }
+function paintSync(){
+  const el=document.getElementById('syncBadge');
+  if(el) el.textContent=STORAGE_MODE;
+  const el2=document.getElementById('syncWhere');
+  if(el2) el2.textContent=STORAGE_MODE;
+}
+
+/* 앱 전체가 호출하는 저장 진입점 (기존 코드 그대로 사용) */
+function save(){
+  DIRTY=true; mirrorWrite(true); setMode('저장 중…');
+  if(SAVE_TIMER) clearTimeout(SAVE_TIMER);
+  SAVE_TIMER=setTimeout(()=>{ flush(); }, 400);
+}
+
+async function flush(){
+  if(SAVING || !DIRTY) return;
+  if(!Session.token || !DB) return;
+  SAVING=true; DIRTY=false;
+  try{
+    const res = await Net.rpc('hr_push', {
+      p_token: Session.token, p_doc: DB, p_base_version: DOC_VERSION
+    });
+    if(res && res.conflict){
+      DB = res.doc; DOC_VERSION = res.version; normalizeDB();
+      mirrorWrite(false); setMode('최신 내용으로 갱신됨');
+      render();
+      toast('다른 기기에서 먼저 저장되어 최신 내용을 불러왔습니다. 방금 입력한 내용을 다시 확인해 주세요.');
+    }else{
+      DOC_VERSION = res.version; RETRY_MS=0;
+      mirrorWrite(false); setMode('Supabase 저장됨');
+    }
+  }catch(e){
+    DIRTY=true; mirrorWrite(true);
+    if(e.status===401 || /세션이 만료/.test(e.message||'')){
+      setMode('세션 만료'); SAVING=false;
+      Session.clear(); toast('세션이 만료되었습니다. 다시 로그인해 주세요.');
+      go({screen:'login', me:null, role:null, loginView:'login', loginErr:''});
+      return;
+    }
+    RETRY_MS = Math.min(RETRY_MS ? RETRY_MS*2 : 3000, 60000);
+    setMode(`저장 실패 — ${Math.round(RETRY_MS/1000)}초 후 재시도`);
+    setTimeout(()=>{ flush(); }, RETRY_MS);
+  }finally{
+    SAVING=false;
+    if(DIRTY && !RETRY_MS) setTimeout(()=>{ flush(); }, 300);
+  }
+}
+
+/* 저장이 끝날 때까지 기다림 (계정 저장처럼 순서가 중요한 경우) */
+async function flushNow(){
+  if(SAVE_TIMER) clearTimeout(SAVE_TIMER);
+  for(let i=0;i<40 && (DIRTY||SAVING);i++){
+    if(!SAVING) await flush(); else await new Promise(r=>setTimeout(r,150));
+  }
+  return !DIRTY;
+}
+
+/* ---------- 서버에서 최신 데이터 가져오기 ---------- */
+async function pull({silent=true}={}){
+  if(!Session.token) return false;
+  if(DIRTY||SAVING) return false;          // 저장 대기 중이면 덮어쓰지 않음
+  try{
+    const res = await Net.rpc('hr_pull', {p_token: Session.token});
+    if(res.version !== DOC_VERSION){
+      DB = res.doc; DOC_VERSION = res.version; normalizeDB();
+      mirrorWrite(false);
+      if(UI.screen==='app') render();
+    }
+    setMode('Supabase 연결됨');
+    return true;
+  }catch(e){
+    if(e.status===401 || /세션이 만료/.test(e.message||'')){
+      Session.clear();
+      if(!silent) toast('세션이 만료되었습니다. 다시 로그인해 주세요.');
+      go({screen:'login', me:null, role:null, loginView:'login', loginErr:''});
+    }else{
+      setMode('오프라인 — 로컬 사본 표시 중');
+    }
+    return false;
+  }
+}
+
+/* 다른 기기의 변경을 주기적으로 반영 */
+setInterval(()=>{ if(UI.screen==='app' && !document.hidden) pull(); }, 20000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden && UI.screen==='app') pull(); });
+window.addEventListener('online', ()=>{ RETRY_MS=0; if(DIRTY) flush(); else pull(); });
 
 /* ============================================================
    초기 데이터
@@ -551,10 +686,10 @@ function panelLogin(){
       <div class="field"><label>비밀번호</label><input id="li-pw" type="password" placeholder="비밀번호를 입력하세요" onkeydown="if(event.key==='Enter')doLogin()"></div>
       <button class="btn-primary" onclick="doLogin()">로그인</button>
       <div class="linkrow">
-        ${DB.masters.length?'':`<button onclick="go({loginView:'signup',loginErr:'',loginMsg:''})">회원가입</button><span class="sep"></span>`}
+        ${HAS_MASTER?'':`<button onclick="go({loginView:'signup',loginErr:'',loginMsg:''})">회원가입</button><span class="sep"></span>`}
         <button onclick="go({loginView:'findpw',loginErr:'',loginMsg:'',find:{step:1,acct:null}})">비밀번호 찾기</button>
       </div>
-      <div class="hint">${DB.masters.length
+      <div class="hint">${HAS_MASTER
         ? `마스터관리자 계정은 1개만 직접 가입할 수 있습니다. 담당자 추가는 최초 관리자가 ‘관리자 계정’ 메뉴에서 등록합니다.`
         : `<b>최초 설정</b><br>아직 등록된 마스터관리자가 없습니다. 아래 <b>회원가입</b>으로 HR 담당자 계정을 먼저 만드세요.`}</div>`
     : `
@@ -566,7 +701,7 @@ function panelLogin(){
 
 /* ---------- 회원가입 (마스터관리자) ---------- */
 function panelSignup(){
-  if(DB.masters.length) return `
+  if(HAS_MASTER) return `
     <button class="backlink" onclick="go({loginView:'login',loginErr:'',loginMsg:''})">← 로그인으로 돌아가기</button>
     <h2>가입할 수 없습니다</h2>
     <p class="desc">마스터관리자는 1개 계정만 직접 가입할 수 있으며, 이미 등록되어 있습니다.</p>
@@ -585,8 +720,9 @@ function panelSignup(){
     <button class="btn-primary" onclick="doSignup()">가입하기</button>
     <div class="hint">핸드폰번호는 비밀번호를 찾을 때 본인 확인에 사용됩니다.</div>`;
 }
-function doSignup(){
-  if(DB.masters.length){go({loginErr:'이미 마스터관리자가 등록되어 있습니다.'});return;}
+async function doSignup(){
+  if(UI.busy) return;
+  if(HAS_MASTER){go({loginErr:'이미 마스터관리자가 등록되어 있습니다.'});return;}
   const name=$('#su-name').value.trim(), birth=normBirth($('#su-birth').value),
         phone=fmtPhone($('#su-phone').value), userId=$('#su-id').value.trim(),
         pw=$('#su-pw').value, pw2=$('#su-pw2').value;
@@ -595,10 +731,16 @@ function doSignup(){
   if(userId.length<4){go({loginErr:'아이디는 4자 이상으로 입력하세요.'});return;}
   if(pw.length<4){go({loginErr:'비밀번호는 4자 이상으로 입력하세요.'});return;}
   if(pw!==pw2){go({loginErr:'비밀번호가 서로 일치하지 않습니다.'});return;}
-  if(DB.masters.some(m=>m.userId===userId)){go({loginErr:'이미 사용 중인 아이디입니다.'});return;}
-  DB.masters.push({id:uid('m'),name,birth,phone,userId,pw,company:'본사 HR',owner:true});
-  save();
-  go({loginView:'login',loginRole:'master',loginErr:'',loginMsg:`가입이 완료되었습니다. 아이디 ${userId}로 로그인하세요.`});
+  go({busy:true, loginErr:'', loginMsg:'가입 처리 중…'});
+  try{
+    const res = await Net.rpc('hr_signup',
+      {p_name:name, p_birth:birth, p_phone:phone, p_user_id:userId, p_pw:pw});
+    HAS_MASTER=true; UI.busy=false;
+    enterApp(res);
+    toast('가입이 완료되었습니다.');
+  }catch(e){
+    go({busy:false, loginMsg:'', loginErr:e.message||'가입에 실패했습니다.'});
+  }
 }
 
 /* ---------- 비밀번호 찾기 ---------- */
@@ -612,9 +754,8 @@ function panelFind(){
     <div class="field"><label>아이디</label><input id="fp-id" placeholder="아이디" onkeydown="if(event.key==='Enter')findStep1()"></div>
     <button class="btn-primary" onclick="findStep1()">다음</button>`;
   if(f.step===2){
-    const m=DB.masters.find(x=>x.id===f.acct);
-    return `${head}<p class="desc">${esc(m.name)}님, 등록된 핸드폰번호 전체를 입력해 주세요.</p>${bar}${err}
-    <div class="maskbox"><div class="lb">등록된 핸드폰번호</div><div class="vl">${maskPhone(m.phone)}</div></div>
+    return `${head}<p class="desc">${esc(f.name||'')}님, 등록된 핸드폰번호 전체를 입력해 주세요.</p>${bar}${err}
+    <div class="maskbox"><div class="lb">등록된 핸드폰번호</div><div class="vl">${esc(f.phoneMasked||'')}</div></div>
     <div class="field"><label>핸드폰번호 전체 입력</label><input id="fp-phone" placeholder="예: 010-1234-5678" onkeydown="if(event.key==='Enter')findStep2()"></div>
     <button class="btn-primary" onclick="findStep2()">본인 확인</button>`;
   }
@@ -623,24 +764,36 @@ function panelFind(){
     <div class="field"><label>새 비밀번호 확인</label><input id="fp-pw2" type="password" placeholder="한 번 더 입력" onkeydown="if(event.key==='Enter')findStep3()"></div>
     <button class="btn-primary" onclick="findStep3()">비밀번호 재설정</button>`;
 }
-function findStep1(){
+async function findStep1(){
+  if(UI.busy) return;
   const v=$('#fp-id').value.trim();
-  const m=DB.masters.find(x=>x.userId===v);
-  if(!m){go({loginErr:'등록되지 않은 아이디입니다.'});return;}
-  if(!m.phone){go({loginErr:'이 계정에는 핸드폰번호가 등록되어 있지 않습니다. 다른 HR 담당자에게 문의하세요.'});return;}
-  go({loginErr:'',find:{step:2,acct:m.id}});
+  if(!v){go({loginErr:'아이디를 입력하세요.'});return;}
+  go({busy:true, loginErr:''});
+  try{
+    const r=await Net.rpc('hr_reset1',{p_user_id:v});
+    go({busy:false, loginErr:'', find:{step:2, acct:r.acct, name:r.name, phoneMasked:r.phoneMasked}});
+  }catch(e){ go({busy:false, loginErr:e.message||'확인에 실패했습니다.'}); }
 }
-function findStep2(){
-  const m=DB.masters.find(x=>x.id===UI.find.acct);
-  if(digits($('#fp-phone').value)!==digits(m.phone)){go({loginErr:'핸드폰번호가 일치하지 않습니다.'});return;}
-  go({loginErr:'',find:{step:3,acct:m.id}});
+async function findStep2(){
+  if(UI.busy) return;
+  const f=UI.find||{};
+  go({busy:true, loginErr:''});
+  try{
+    const r=await Net.rpc('hr_reset2',{p_acct:f.acct, p_phone:$('#fp-phone').value});
+    go({busy:false, loginErr:'', find:Object.assign({},f,{step:3, ticket:r.ticket})});
+  }catch(e){ go({busy:false, loginErr:e.message||'본인 확인에 실패했습니다.'}); }
 }
-function findStep3(){
+async function findStep3(){
+  if(UI.busy) return;
   const pw=$('#fp-pw').value, pw2=$('#fp-pw2').value;
   if(pw.length<4){go({loginErr:'비밀번호는 4자 이상으로 입력하세요.'});return;}
   if(pw!==pw2){go({loginErr:'비밀번호가 서로 일치하지 않습니다.'});return;}
-  const m=DB.masters.find(x=>x.id===UI.find.acct); m.pw=pw; save();
-  go({loginView:'login',loginRole:'master',loginErr:'',loginMsg:'비밀번호가 변경되었습니다. 새 비밀번호로 로그인하세요.'});
+  go({busy:true, loginErr:''});
+  try{
+    await Net.rpc('hr_reset3',{p_ticket:(UI.find||{}).ticket, p_pw:pw});
+    go({busy:false, loginView:'login', loginRole:'master', loginErr:'', find:{step:1,acct:null},
+        loginMsg:'비밀번호가 변경되었습니다. 새 비밀번호로 로그인하세요.'});
+  }catch(e){ go({busy:false, loginErr:e.message||'변경에 실패했습니다.'}); }
 }
 
 /* ---------- 입력 정규화 ---------- */
@@ -661,27 +814,44 @@ function normBirth(v){
   if(d.length===8) return `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}`;
   return (v||'').trim();
 }
-function doLogin(){
-  if(UI.loginRole==='master'){
-    const id=($('#li-id').value||'').trim(), pw=$('#li-pw').value||'';
-    if(!id||!pw){go({loginErr:'아이디와 비밀번호를 모두 입력하세요.'});return;}
-    const m=DB.masters.find(x=>x.userId===id);
-    if(!m||m.pw!==pw){go({loginErr:'아이디 또는 비밀번호가 올바르지 않습니다.'});return;}
-    go({screen:'app',me:m,role:'master',loginErr:'',loginMsg:'',nav:'dash',
-        company:COMPANIES[0],month:new Date().getMonth()+1,detail:null});
-    return;
-  }
-  const name=($('#li-name').value||'').trim();
-  const birth=normBirth($('#li-birth').value);
-  if(!name||!birth){go({loginErr:'이름과 생년월일을 모두 입력하세요.'});return;}
-  const pool = UI.loginRole==='sup'?DB.sups:DB.workers;
-  const f=pool.find(p=>p.name===name && p.birth===birth);
-  if(!f){go({loginErr:'등록되지 않은 계정입니다. 이름과 생년월일을 확인하세요.'});return;}
-  go({screen:'app',me:f,role:UI.loginRole,loginErr:'',loginMsg:'',nav:'att',
-      company: UI.loginRole==='sup'?f.company:COMPANIES[0],
-      month:new Date().getMonth()+1, detail:null, myDate:todayStr()});
+/* 로그인 성공 응답을 화면에 반영 */
+function enterApp(res){
+  Session.set(res.token);
+  DB = res.doc; DOC_VERSION = res.version; normalizeDB(); mirrorWrite(false);
+  setMode('Supabase 연결됨');
+  const role = res.role;
+  go({screen:'app', me:res.me, role, loginErr:'', loginMsg:'',
+      nav: role==='master'?'dash':'att',
+      company: (role==='sup' && res.me && res.me.company) ? res.me.company : COMPANIES[0],
+      month: new Date().getMonth()+1, detail:null, myDate:todayStr()});
 }
-function logout(){go({screen:'login',me:null,role:null,detail:null,loginView:'login',loginErr:'',loginMsg:'',find:{step:1,acct:null}});}
+
+async function doLogin(){
+  if(UI.busy) return;
+  let role=UI.loginRole, a, b;
+  if(role==='master'){
+    a=($('#li-id').value||'').trim(); b=$('#li-pw').value||'';
+    if(!a||!b){go({loginErr:'아이디와 비밀번호를 모두 입력하세요.'});return;}
+  }else{
+    a=($('#li-name').value||'').trim(); b=normBirth($('#li-birth').value);
+    if(!a||!b){go({loginErr:'이름과 생년월일을 모두 입력하세요.'});return;}
+  }
+  go({busy:true, loginErr:'', loginMsg:'로그인 중…'});
+  try{
+    const res = await Net.rpc('hr_login', {p_role:role, p_a:a, p_b:b});
+    UI.busy=false;
+    enterApp(res);
+  }catch(e){
+    go({busy:false, loginMsg:'', loginErr:e.message||'로그인에 실패했습니다.'});
+  }
+}
+
+async function logout(){
+  const t=Session.token;
+  Session.clear(); DB=null; DOC_VERSION=0; DIRTY=false;
+  go({screen:'login',me:null,role:null,detail:null,loginView:'login',loginErr:'',loginMsg:'',find:{step:1,acct:null}});
+  if(t){ try{ await Net.rpc('hr_logout',{p_token:t}); }catch(e){} }
+}
 
 /* ============================================================
    공통 레이아웃
@@ -699,6 +869,7 @@ function shell(inner){
       ${menus.map(([k,l,i])=>`<div class="navitem ${UI.nav===k?'on':''}" onclick="go({nav:'${k}',detail:null})"><span class="ic">${i}</span>${l}</div>`).join('')}
       <div class="spacer"></div>
       <div class="me"><b>${esc(UI.me.name)}</b>${esc(UI.me.company||'')}<span class="tag">${roleLabel}</span></div>
+      <div class="sync">저장 상태 · <span id="syncBadge">${esc(STORAGE_MODE)}</span></div>
       <button class="out" onclick="logout()">로그아웃</button>
     </aside>
     <main class="main">${inner}</main>
@@ -1150,7 +1321,7 @@ function viewMasters(){
     <div class="note" style="margin-top:14px">추가된 관리자도 3사 전체 근태와 인력 정보를 관리할 수 있습니다. 다만 관리자 계정의 추가·삭제는 최초 관리자만 할 수 있습니다.</div>
   </div></div>`:''}
 
-  <div class="card"><h3>데이터 백업 · 복원 <span class="pill p-co">저장 위치: ${STORAGE_MODE}</span></h3><div class="body">
+  <div class="card"><h3>데이터 백업 · 복원 <span class="pill p-co">저장 위치: <span id="syncWhere">${esc(STORAGE_MODE)}</span></span></h3><div class="body">
     <div class="row">
       <button class="btn pri" onclick="exportData()">백업 파일 내려받기</button>
       <button class="btn" onclick="document.getElementById('impFile').click()">백업 파일로 복원</button>
@@ -1201,24 +1372,38 @@ function importData(input){
 }
 function editMasterOpen(id){go({editMaster:Object.assign({},DB.masters.find(m=>m.id===id))});}
 
-function saveMaster(id){
+async function saveMaster(id){
   if(!UI.me.owner){toast('최초 마스터관리자만 계정을 등록·수정할 수 있습니다.');return;}
   const name=$('#a-name').value.trim(), birth=normBirth($('#a-birth').value),
         phone=fmtPhone($('#a-phone').value), pw=$('#a-pw').value;
   if(!name||!birth||!phone){toast('성명, 생년월일, 핸드폰번호는 필수입니다.');return;}
   if(digits(phone).length<10){toast('핸드폰번호를 정확히 입력하세요.');return;}
+  let target;
   if(id){
     const m=DB.masters.find(x=>x.id===id);
-    Object.assign(m,{name,birth,phone}); if(pw) m.pw=pw;
+    Object.assign(m,{name,birth,phone}); delete m.pw;
     if(m.id===UI.me.id) UI.me=m;
+    target=m;
   }else{
     const userId=$('#a-id').value.trim();
     if(userId.length<4){toast('아이디는 4자 이상으로 입력하세요.');return;}
     if(pw.length<4){toast('비밀번호는 4자 이상으로 입력하세요.');return;}
     if(DB.masters.some(x=>x.userId===userId)){toast('이미 사용 중인 아이디입니다.');return;}
-    DB.masters.push({id:uid('m'),name,birth,phone,userId,pw,company:'본사 HR',owner:false});
+    target={id:uid('m'),name,birth,phone,userId,company:'본사 HR',owner:false};
+    DB.masters.push(target);
   }
   save(); go({editMaster:null});
+  // 문서가 서버에 올라간 뒤에 자격증명(비밀번호·핸드폰번호)을 반영합니다.
+  try{
+    await flushNow();
+    // 새 계정이면 hr_set_pw 가 자격증명 행을 만들므로 먼저 호출해야 합니다.
+    if(pw) await Net.rpc('hr_set_pw',{p_token:Session.token, p_master_id:target.id, p_pw:pw});
+    await Net.rpc('hr_sync_cred',{p_token:Session.token, p_master_id:target.id,
+                                  p_user_id:target.userId||'', p_phone:phone});
+    toast(pw ? '계정 정보와 비밀번호를 저장했습니다.' : '계정 정보를 저장했습니다.');
+  }catch(e){
+    toast('계정은 저장되었으나 비밀번호 반영에 실패했습니다: '+(e.message||''));
+  }
 }
 function delMaster(id){
   const m=DB.masters.find(x=>x.id===id);
@@ -1728,11 +1913,57 @@ function render(){
   $('#app').innerHTML=shell(inner);
 }
 (async function init(){
-  DB = await Store.load();
-  if(!DB) DB = emptyDB();
-  normalizeDB();
-  save();
-  render();
+  render();   // 로그인 화면 먼저 표시
+
+  if(!Net.ready()){
+    setMode('Supabase 미설정');
+    go({loginErr:'Supabase 연결 정보가 설정되지 않았습니다. index.html 상단의 SUPABASE_URL / SUPABASE_ANON_KEY 를 입력하세요.'});
+    return;
+  }
+
+  // 가입 가능 여부 확인
+  try{
+    const st = await Net.rpc('hr_state');
+    HAS_MASTER = !!st.hasMaster;
+    setMode('Supabase 연결됨');
+  }catch(e){
+    setMode('서버 연결 실패');
+    go({loginErr:'서버에 연결할 수 없습니다. ' + (e.message||'')});
+    return;
+  }
+
+  // 저장된 세션이 있으면 자동 로그인
+  const tok = Session.load();
+  if(!tok){ render(); return; }
+  try{
+    const res = await Net.rpc('hr_pull', {p_token: tok});
+    DB = res.doc; DOC_VERSION = res.version; normalizeDB();
+
+    // 새로고침 전에 저장하지 못한 변경이 남아 있으면 복구
+    const mir = mirrorRead();
+    if(mir && mir.dirty && mir.doc){
+      DB = mir.doc; normalizeDB(); DIRTY = true;
+      setMode('저장하지 못한 변경 반영 중…');
+      flush();
+    }else{
+      mirrorWrite(false);
+    }
+
+    const me = res.role==='master'
+      ? (DB.masters||[]).find(m=>m.id===res.subjectId)
+      : res.role==='sup'
+        ? (DB.sups||[]).find(s=>s.id===res.subjectId)
+        : (DB.workers||[]).find(w=>w.id===res.subjectId);
+    if(!me){ Session.clear(); render(); return; }
+
+    go({screen:'app', me, role:res.role,
+        nav: res.role==='master'?'dash':'att',
+        company: (res.role==='sup' && me.company) ? me.company : COMPANIES[0],
+        month:new Date().getMonth()+1, detail:null, myDate:todayStr()});
+  }catch(e){
+    Session.clear();
+    render();
+  }
 })();
 </script>
 </body>
