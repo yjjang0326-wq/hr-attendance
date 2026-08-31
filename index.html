@@ -714,9 +714,10 @@ function panelLogin(){
         : `<b>최초 설정</b><br>아직 등록된 마스터관리자가 없습니다. 아래 <b>회원가입</b>으로 HR 담당자 계정을 먼저 만드세요.`}</div>`
     : `
       <div class="field"><label>이름</label><input id="li-name" placeholder="이름을 입력하세요" onkeydown="if(event.key==='Enter')doLogin()"></div>
-      <div class="field"><label>생년월일</label><input id="li-birth" placeholder="예: 2002-04-11 또는 20020411" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <div class="field"><label>생년월일 <span style="font-weight:600;color:var(--sky-700)">앞 6자리</span></label><input id="li-birth" inputmode="numeric" maxlength="8" placeholder="예: 2002년 4월 11일 → 020411" onkeydown="if(event.key==='Enter')doLogin()"></div>
       <button class="btn-primary" onclick="doLogin()">로그인</button>
-      <div class="hint">HR 담당자가 등록한 <b>이름과 생년월일</b>로 로그인합니다. 계정이 없다면 HR 담당자에게 등록을 요청하세요.</div>`}`;
+      <div class="hint">HR 담당자가 등록한 <b>이름</b>과 <b>생년월일 앞 6자리(YYMMDD)</b>로 로그인합니다.<br>
+        2002년 4월 11일생이면 <b>020411</b> 을 입력하세요. 계정이 없다면 HR 담당자에게 등록을 요청하세요.</div>`}`;
 }
 
 /* ---------- 회원가입 (마스터관리자) ---------- */
