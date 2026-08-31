@@ -269,8 +269,12 @@ const hm=m=>{m=Math.max(0,Math.round(m||0));return `${Math.floor(m/60)}시간 ${
 const hdec=m=>(Math.max(0,m||0)/60).toFixed(1);
 const todayStr=()=>{const d=new Date();return ymd(d.getFullYear(),d.getMonth()+1,d.getDate());};
 
-/* 휴게시간 규칙: 총 체류 8시간 이상 → 60분 / 4시간 이상 → 30분 */
-function breakOf(gross){ return gross>=480?60 : gross>=240?30 : 0; }
+/* 휴게시간 규칙 (근로기준법 54조 — 판정 기준은 체류가 아닌 '근로시간')
+   · 체류 9시간 이상 → 60분  (공제 후 근로 8시간 이상)
+   · 체류 4시간 이상 → 30분
+   예) 10:00~18:00 = 체류 8시간 → 휴게 30분 → 근로 7시간 30분
+       09:00~18:00 = 체류 9시간 → 휴게 60분 → 근로 8시간 */
+function breakOf(gross){ return gross>=540?60 : gross>=240?30 : 0; }
 function calcWork(inT,outT){
   const a=t2m(inT), b=t2m(outT);
   if(a==null||b==null) return null;
@@ -1644,7 +1648,7 @@ function viewMy(){
     :`<div class="empty"><b>이 달의 기록이 없습니다</b>위에서 근무일을 선택하고 출근 시간을 입력하세요.</div>`}
   </div></div>
   ${weeklyCard(w,s)}
-  <div class="note"><b>안내</b> · 4시간 이상 근무하면 30분, 8시간 이상 근무하면 1시간의 휴게시간이 자동 공제됩니다. 감독자가 승인한 기록은 수정할 수 없습니다.</div>`;
+  <div class="note"><b>안내</b> · 출근~퇴근 체류시간이 <b>4시간 이상이면 30분</b>, <b>9시간 이상이면 1시간</b>의 휴게시간이 자동 공제됩니다. (예: 10:00~18:00 → 휴게 30분, 근무 7시간 30분) 감독자가 승인한 기록은 수정할 수 없습니다.</div>`;
 }
 function isSchedDay(w,d){
   const sched=(w.days&&w.days.length)?w.days:[1,2,3,4,5];
@@ -1684,8 +1688,8 @@ function viewRule(){
     <div class="card"><h3>휴게시간 자동 부여</h3><div class="body">
       <table><thead><tr><th>총 체류시간</th><th class="c">휴게시간</th><th class="r">실 근무시간</th></tr></thead><tbody>
         <tr><td>4시간 미만</td><td class="c">없음</td><td class="r">체류시간 전부</td></tr>
-        <tr><td>4시간 이상 ~ 8시간 미만</td><td class="c">30분</td><td class="r">체류시간 − 30분</td></tr>
-        <tr><td>8시간 이상</td><td class="c">60분</td><td class="r">체류시간 − 60분</td></tr>
+        <tr><td>4시간 이상 ~ 9시간 미만</td><td class="c">30분</td><td class="r">체류시간 − 30분</td></tr>
+        <tr><td>9시간 이상</td><td class="c">60분</td><td class="r">체류시간 − 60분</td></tr>
       </tbody></table>
       <div class="note" style="margin-top:12px"><b>예시</b> 출근 10:00 / 퇴근 14:30 → 체류 4시간 30분, 휴게 30분 공제 → <b>실 근무 4시간</b></div>
     </div></div>
