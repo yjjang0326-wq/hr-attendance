@@ -484,7 +484,7 @@ function monthRows(wid,y,m){
    · 지급 요건: ① 월~금 소정근로일 개근 + ② 해당 주 15시간 이상 근로 (둘 다 충족)
    · 평일 공휴일은 개근으로 인정
    · 금액 = 시급 × 8 × 해당 주 근무시간 ÷ 40 (상한 8시간분)
-   · 차주 월요일(첫 소정근로일)에 실제 출근해야 지급 → 그 출근일이 속한 달에 반영
+   · 차주(월~일) 중 하루라도 실제 출근해야 지급 (요일 무관) → 지급 기준일이 속한 달에 반영
    · 승인 여부와 무관하게 입력된 출퇴근 기록으로 자동 산정 (반려 건은 제외) */
 const workedOn=(wid,d)=>{const r=recOf(wid,d);return !!(r&&r.status!=='rejected'&&r.in&&r.out);};
 const netOn=(wid,d)=>{const r=recOf(wid,d);if(!r||r.status==='rejected')return 0;const c=calcWork(r.in,r.out);return c?c.net:0;};
@@ -507,9 +507,10 @@ function weeklyPay(wid,y,m){
     let weekMin=0; for(let i=0;i<7;i++) weekMin+=netOn(wid,addDays(base,i));
     const absent=req.filter(dt=>!workedOn(wid,dt));
     const full=req.length>0 && absent.length===0;
-    let chk=null;                                // 차주 첫 소정근로일(공휴일 제외)
-    for(let i=0;i<5;i++){const dt=addDays(payMon,i); if(!sched.includes(i+1)||isHoliday(dt))continue; chk=dt; break;}
-    const attended=chk?workedOn(wid,chk):false;
+    // 차주(월~일) 중 하루라도 실제 출근하면 지급 — 요일은 따지지 않음
+    let chk=null;
+    for(let i=0;i<7;i++){const dt=addDays(payMon,i); if(workedOn(wid,dt)){chk=dt;break;}}
+    const attended=!!chk;
     const hours=Math.min(weekMin/60,40);
     const enough=weekMin>=900;                 // 해당 주 15시간 이상 근로
     const amt=(full&&attended&&enough)?Math.round(w.wage*8*hours/40):0;
@@ -1128,14 +1129,14 @@ function weeklyCard(w,s){
   return `<div class="card"><h3>주휴수당 산정 내역 <span class="pill ${s.weekly?'p-ok':'p-none'}">${won(s.weekly)}</span></h3>
     <div class="body tight">
     ${rows.length?`<table>
-      <thead><tr><th>판정 대상 주 (월~일)</th><th class="c">평일 소정근로일</th><th class="c">공휴일</th><th class="c">개근</th><th class="c">주 15시간</th><th class="c">차주 첫 출근일</th><th class="r">주 근무시간</th><th class="r">주휴수당</th></tr></thead>
+      <thead><tr><th>판정 대상 주 (월~일)</th><th class="c">평일 소정근로일</th><th class="c">공휴일</th><th class="c">개근</th><th class="c">주 15시간</th><th class="c">차주 출근</th><th class="r">주 근무시간</th><th class="r">주휴수당</th></tr></thead>
       <tbody>${rows.map(r=>`<tr>
         <td class="num">${mdLabel(r.from)} ~ ${mdLabel(r.to)}<div style="font-size:11.5px;color:var(--muted)">지급 기준일 ${mdLabel(r.payMon)}(월)</div></td>
         <td class="c num">${r.reqN}일</td>
         <td class="c num">${r.holN?r.holN+'일':'-'}</td>
         <td class="c">${r.full?'<span class="pill p-ok">개근</span>':`<span class="pill p-no">결근 ${r.absentN}일</span>`}</td>
         <td class="c">${r.enough?'<span class="pill p-ok">충족</span>':'<span class="pill p-no">미달</span>'}</td>
-        <td class="c">${r.chk?`${mdLabel(r.chk)} ${r.attended?'<span class="pill p-ok">출근</span>':'<span class="pill p-no">미출근</span>'}`:'-'}</td>
+        <td class="c">${r.attended?`${mdLabel(r.chk)} <span class="pill p-ok">출근</span>`:'<span class="pill p-no">미출근</span>'}</td>
         <td class="r num" style="color:${r.enough?'var(--ink)':'var(--no)'}">${hdec(r.weekMin)}h</td>
         <td class="r num"><b style="color:${r.amt?'var(--sky-700)':'var(--muted)'}">${won(r.amt)}</b></td>
       </tr>`).join('')}</tbody>
@@ -1144,7 +1145,7 @@ function weeklyCard(w,s){
     </div>
     <div class="body" style="padding-top:0"><div class="note">
       <b>계산식</b> 시급 ${won(w.wage)} × 8시간 × 해당 주 근무시간 ÷ 40 (주 40시간 상한)<br>
-      <b>지급 조건</b> ① 대상 주의 월~금 소정근로일 <b>개근</b> ② 해당 주 <b>15시간 이상 근로</b> ③ 차주 첫 소정근로일 실제 출근 — <b>세 가지를 모두 충족</b>해야 지급됩니다. 전월 마지막 주분은 차주 월요일이 속한 <b>당월</b>에 지급됩니다.<br>
+      <b>지급 조건</b> ① 대상 주의 월~금 소정근로일 <b>개근</b> ② 해당 주 <b>15시간 이상 근로</b> ③ <b>차주 중 하루라도 실제 출근</b>(요일 무관) — <b>세 가지를 모두 충족</b>해야 지급됩니다. 전월 마지막 주분은 지급 기준일(월요일)이 속한 <b>당월</b>에 지급됩니다.<br>
       <b>산정 기준</b> 주휴수당은 <b>승인 여부와 관계없이</b> 입력된 출퇴근 기록으로 자동 계산됩니다. 반려된 기록만 제외됩니다.
     </div></div>
   </div>`;
@@ -1700,7 +1701,7 @@ function viewRule(){
         <tr><td><b>결근</b></td><td>하루라도 결근하면 그 주의 주휴수당은 <b>미지급</b></td></tr>
         <tr><td><b>산정 시간</b></td><td>휴게시간을 제외한 실근로시간 기준 (월~일 합계)</td></tr>
         <tr><td><b>계산식</b></td><td>시급 × 8 × 해당 주 근무시간 ÷ 40 (주 40시간 상한)</td></tr>
-        <tr><td><b>지급 시점</b></td><td>개근한 주의 <b>차주 첫 소정근로일에 실제 출근</b>해야 지급. 따라서 전월 마지막 주분은 차주 월요일이 속한 <b>당월</b>에 반영</td></tr>
+        <tr><td><b>지급 시점</b></td><td>개근한 주의 <b>차주(월~일) 중 하루라도 실제 출근</b>하면 지급하며 <b>요일은 따지지 않음</b>. 전월 마지막 주분은 지급 기준일(월요일)이 속한 <b>당월</b>에 반영</td></tr>
         <tr><td><b>산정 방식</b></td><td>관리자 승인 없이 입력된 출퇴근 기록만으로 <b>자동 계산</b> (반려 건은 제외)</td></tr>
       </tbody></table>
       <div class="note" style="margin-top:12px"><b>예시 1</b> 시급 10,320원, 월~금 주 20시간 개근 → 15시간 이상 충족 → 10,320 × 8 × 20 ÷ 40 = <b>41,280원</b><br>
