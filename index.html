@@ -1583,11 +1583,10 @@ function viewMy(){
       <td class="c">${rr.status==='approved'?'<span style="color:var(--muted);font-size:12px">수정 불가</span>':`<button class="btn sm" onclick="go({myDate:'${dt}'})">보기</button>`}</td></tr>`;
   }
 
-  const isToday = date===todayStr();
   const stMsg = hol ? `${holName(date)} · 공휴일은 입력이 불가합니다.`
     : offDay ? `소정근로일이 아닙니다. 근로요일(${daysLabel(w)})에만 입력할 수 있습니다.`
     : locked ? '승인 완료된 근무일입니다. 수정하려면 감독자에게 문의하세요.'
-    : '출근할 때 출근하기 버튼을 누르고, 퇴근할 때 퇴근 시간을 입력해 신청하세요.';
+    : '출근 시간과 퇴근 시간을 각각 입력해 신청하세요. 감독자 승인 후 급여에 반영됩니다.';
 
   return `
   <div class="pagehead"><div><h1>내 근무 기록</h1>
@@ -1605,21 +1604,21 @@ function viewMy(){
       : offDay?`<div class="offbox">소정근로일이 아니어서 입력할 수 없습니다<span>근로요일 · ${daysLabel(w)}</span></div>`:`
       <div class="punch">
         <div class="ph">1. 출근 ${r.in?`<span class="pill p-wait">신청 ${r.in}</span>`:'<span class="pill p-none">미신청</span>'}</div>
-        ${r.in
-          ? `<div class="done">출근 시각 <b class="num">${r.in}</b> 기록 완료<span>버튼을 누른 시각으로 기록되어 수정할 수 없습니다.</span></div>`
-          : !isToday
-            ? `<div class="offbox" style="padding:14px">출근 기록은 당일에만 가능합니다<span>${date.replace(/-/g,'. ')} 근무분은 감독자에게 요청하세요.</span></div>`
-            : `<button class="bigbtn" style="width:100%" ${blocked?'disabled':''} onclick="punchIn()">출근하기</button>
-               <div style="font-size:12px;color:var(--muted);margin-top:7px">버튼을 누른 <b>현재 시각</b>이 그대로 기록됩니다. 직접 입력은 불가합니다.</div>`}
+        <div class="row" style="gap:8px">
+          <input id="my-in" class="tin" style="flex:1" type="time" value="${r.in||''}" ${blocked?'disabled':''}>
+          <button class="btn sm" ${blocked?'disabled':''} onclick="fillNow('in')">현재 시각</button>
+          <button class="btn pri" ${blocked?'disabled':''} onclick="applyTime('in')">출근 신청</button>
+        </div>
+        ${!blocked?`<div style="font-size:12px;color:var(--muted);margin-top:7px">출근 시간을 직접 입력해 신청합니다. 승인 전까지는 다시 신청해 수정할 수 있습니다.</div>`:''}
       </div>
       <div class="punch">
         <div class="ph">2. 퇴근 ${r.out?`<span class="pill p-wait">신청 ${r.out}</span>`:'<span class="pill p-none">미신청</span>'}</div>
         <div class="row" style="gap:8px">
-          <input id="my-out" class="tin" style="flex:1" type="time" value="${r.out||''}" ${blocked||!r.in?'disabled':''}>
-          <button class="btn sm" ${blocked||!r.in?'disabled':''} onclick="fillNow('out')">현재 시각</button>
-          <button class="btn pri" ${blocked||!r.in?'disabled':''} onclick="applyTime('out')">퇴근 신청</button>
+          <input id="my-out" class="tin" style="flex:1" type="time" value="${r.out||''}" ${blocked?'disabled':''}>
+          <button class="btn sm" ${blocked?'disabled':''} onclick="fillNow('out')">현재 시각</button>
+          <button class="btn pri" ${blocked?'disabled':''} onclick="applyTime('out')">퇴근 신청</button>
         </div>
-        ${!r.in&&!blocked?'<div style="font-size:12px;color:var(--muted);margin-top:7px">출근하기를 누른 뒤 입력할 수 있습니다.</div>':''}
+        ${!blocked?`<div style="font-size:12px;color:var(--muted);margin-top:7px">퇴근 시간을 직접 입력해 신청합니다. 승인 전까지는 다시 신청해 수정할 수 있습니다.</div>`:''}
       </div>`}
       <div class="tval"><span>휴게시간 자동 반영</span><b class="num">${c?c.brk+'분':'-'}</b></div>
       <div class="tval"><span>이 날의 근무시간</span><b class="num">${c?hm(c.net):'-'}</b></div>
@@ -1652,7 +1651,7 @@ function isSchedDay(w,d){
   return sched.includes(dowOf(d));
 }
 function fillNow(f){
-  const el=$('#my-out'); if(!el) return;
+  const el=$(f==='in'?'#my-in':'#my-out'); if(!el) return;
   const n=new Date(); el.value=`${pad(n.getHours())}:${pad(n.getMinutes())}`;
 }
 function canInput(w,d){
@@ -1662,27 +1661,17 @@ function canInput(w,d){
   if(r&&r.status==='approved'){toast('승인 완료된 기록은 수정할 수 없습니다.');render();return false;}
   return true;
 }
-/* 출근: 버튼을 누른 현재 시각으로만 기록 (직접 입력 불가) */
-function punchIn(){
-  const w=UI.me, d=UI.myDate;
-  if(!canInput(w,d)) return;
-  if(d!==todayStr()){toast('출근 기록은 당일에만 가능합니다. 지난 날짜는 감독자에게 요청하세요.');render();return;}
-  const r=recOf(w.id,d);
-  if(r&&r.in){toast('이미 출근이 기록되었습니다. 수정이 필요하면 감독자에게 문의하세요.');return;}
-  const n=new Date(), v=`${pad(n.getHours())}:${pad(n.getMinutes())}`;
-  setRec(w.id,d,{in:v,status:'submitted'});
-  render(); toast(`출근 ${v} 기록이 완료되었습니다.`);
-}
-/* 퇴근: 시간 직접 입력 후 신청 */
+/* 출근·퇴근 모두 시간을 직접 입력해 신청 */
 function applyTime(f){
   const w=UI.me, d=UI.myDate;
   if(!canInput(w,d)) return;
-  const r=recOf(w.id,d);
-  if(!(r&&r.in)){toast('출근하기 버튼을 먼저 눌러주세요.');return;}
-  const el=$('#my-out'); const v=el?el.value:'';
-  if(!v){toast('퇴근 시간을 입력한 뒤 신청하세요.');return;}
-  setRec(w.id,d,{out:v,status:'submitted'});
-  render(); toast(`퇴근 ${v} 신청이 완료되었습니다. 감독자 승인 후 확정됩니다.`);
+  const isIn=f==='in', label=isIn?'출근':'퇴근';
+  const el=$(isIn?'#my-in':'#my-out'); const v=el?el.value:'';
+  if(!v){toast(`${label} 시간을 입력한 뒤 신청하세요.`);return;}
+  const r=recOf(w.id,d)||{};
+  if(!isIn && !r.in){toast('출근 시간을 먼저 신청해 주세요.');return;}
+  setRec(w.id,d,isIn?{in:v,status:'submitted'}:{out:v,status:'submitted'});
+  render(); toast(`${label} ${v} 신청이 완료되었습니다. 감독자 승인 후 확정됩니다.`);
 }
 
 /* ============================================================
