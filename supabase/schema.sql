@@ -268,17 +268,12 @@ begin
       from jsonb_array_elements(coalesce(d.data->'masters', '[]'::jsonb)) as t(v)
       where t.v->>'id' = sid;
   else
-    -- 생년월일은 앞 6자리(YYMMDD)로 대조한다.
-    -- 등록값이 2002-04-11 이든 20020411 이든 뒤 6자리는 020411 로 같으므로,
-    -- 6자리만 입력해도 8자리를 그대로 입력해도 인증된다.
-    if length(public.hr__digits(p_b)) < 6 then
-      perform public.hr__fail(gkey);
-      raise exception '생년월일 앞 6자리를 입력하세요. (예: 2002년 4월 11일 → 020411)';
-    end if;
+    -- 생년월일은 8자리(YYYYMMDD) 전체로 대조한다.
+    -- 2002-04-11 / 20020411 어느 형식으로 저장·입력해도 숫자만 뽑아 비교한다.
     select t.v into me from jsonb_array_elements(
       coalesce(d.data->(case when p_role = 'sup' then 'sups' else 'workers' end), '[]'::jsonb)) as t(v)
       where t.v->>'name' = p_a
-        and right(public.hr__digits(t.v->>'birth'), 6) = right(public.hr__digits(p_b), 6)
+        and public.hr__digits(t.v->>'birth') = public.hr__digits(p_b)
       limit 1;
     if me is null then
       perform public.hr__fail(gkey);
